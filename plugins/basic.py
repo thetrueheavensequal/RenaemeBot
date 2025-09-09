@@ -1,50 +1,98 @@
-# plugins/start_commands.py - Core Commands
+# plugins/basic.py - Enhanced Core Commands with Dazai Theme
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from pyrogram.enums import ParseMode, ChatType
-from database import db
-from Bot.config import Config, Messages
+from utils.database import db
+from utils.helpers import humanbytes, get_random_quote, temp_data
+from Bot.config import Config
+from Bot.messages import Messages
 from datetime import datetime
 import psutil
 import time
+import logging
 
-# Start command - works in both private and groups
+logger = logging.getLogger(__name__)
+
+# Start command - Enhanced for both private and group usage
 @Client.on_message(filters.command("start"))
 async def start_command(client: Client, message: Message):
     user_id = message.from_user.id
     username = message.from_user.username
     
-    # Add user to database
-    is_new = await db.add_user(user_id, username)
+    # Check if in group and handle appropriately
+    is_group = message.chat.type != ChatType.PRIVATE
     
-    # Create inline keyboard
+    if is_group:
+        bot_me = await client.get_me()
+        # In groups, only respond if mentioned or replied to
+        if not (f"@{bot_me.username}" in (message.text or "") or 
+                (message.reply_to_message and message.reply_to_message.from_user.is_self)):
+            return
+    
+    # Add user to database
+    try:
+        is_new_user = await db.add_user(user_id, username)
+        
+        # Update user activity
+        await db.update_user_activity(user_id)
+        
+    except Exception as e:
+        logger.error(f"Database error in start command: {e}")
+        is_new_user = False
+    
+    # Create dynamic inline keyboard
     keyboard = [
         [
             InlineKeyboardButton("📚 Help", callback_data="help"),
             InlineKeyboardButton("🎭 About", callback_data="about")
-        ],
-        [
-            InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
-            InlineKeyboardButton("📊 Stats", callback_data="stats")
         ]
     ]
     
-    if Config.SUPPORT_CHAT:
+    # Add settings and stats for private chats
+    if not is_group:
         keyboard.append([
-            InlineKeyboardButton("💬 Support", url=f"https://t.me/{Config.SUPPORT_CHAT}")
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
+            InlineKeyboardButton("📊 My Stats", callback_data="stats")
         ])
     
-    # Send welcome message
-    welcome_text = Messages.START.format(user=message.from_user.mention)
+    # Add support chat if configured
+    if Config.SUPPORT_CHAT:
+        keyboard.append([
+            InlineKeyboardButton("💬 Support Chat", url=f"https://t.me/{Config.SUPPORT_CHAT}")
+        ])
     
-    if Config.BOT_PIC:
-        await message.reply_photo(
-            Config.BOT_PIC,
-            caption=welcome_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    else:
+    # Add group usage info for groups
+    if is_group:
+        keyboard.append([
+            InlineKeyboardButton("ℹ️ Group Usage", callback_data="group_info")
+        ])
+    
+    # Format welcome message with user mention
+    bot_info = await client.get_me()
+    welcome_text = Messages.START.format(
+        user=message.from_user.mention,
+        bot_username=bot_info.username
+    )
+    
+    # Send welcome message with optional photo
+    try:
+        if Config.BOT_PIC and not is_group:  # Only send photo in private chats
+            await message.reply_photo(
+                Config.BOT_PIC,
+                caption=welcome_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await message.reply_text(
+                welcome_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN,
+                disable_web_page_preview=True
+            )
+    except Exception as e:
+        logger.error(f"Failed to send start message: {e}")
+        # Fallback without photo
         await message.reply_text(
             welcome_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -52,253 +100,441 @@ async def start_command(client: Client, message: Message):
             disable_web_page_preview=True
         )
     
-    # Log new user if it's a new user
-    if is_new and Config.LOG_CHANNEL:
-        await client.send_message(
-            Config.LOG_CHANNEL,
-            f"🌸 **New User Joined**\n\n"
-            f"👤 User: {message.from_user.mention}\n"
-            f"🆔 ID: `{user_id}`\n"
-            f"📝 Username: @{username if username else 'None'}\n"
-            f"📅 Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
+    # Log new user joining (admin notification)
+    if is_new_user and Config.LOG_CHANNEL and not is_group:
+        try:
+            await client.send_message(
+                Config.LOG_CHANNEL,
+                f"🌸 **New User Joined Dazai's Atelier**\n\n"
+                f"👤 **User:** {message.from_user.mention}\n"
+                f"🆔 **ID:** `{user_id}`\n"
+                f"📝 **Username:** @{username if username else 'None'}\n"
+                f"📅 **Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"🔗 **Profile:** [View Profile](tg://user?id={user_id})\n\n"
+                f"*\"Another soul seeking the art of file perfection.\"*",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Failed to send log message: {e}")
 
-# Help command
+# Help command with enhanced information
 @Client.on_message(filters.command("help"))
 async def help_command(client: Client, message: Message):
-    keyboard = [[
-        InlineKeyboardButton("🔙 Back", callback_data="start"),
-        InlineKeyboardButton("❌ Close", callback_data="close")
-    ]]
+    # Check group usage
+    is_group = message.chat.type != ChatType.PRIVATE
     
-    await message.reply_text(
-        Messages.HELP,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-# Settings command
-@Client.on_message(filters.command("settings"))
-async def settings_command(client: Client, message: Message):
-    user_id = message.from_user.id
-    user_data = await db.get_user(user_id)
-    
-    # Get user settings
-    caption = user_data.get("caption", "Not set")
-    prefix = user_data.get("prefix", "Not set")
-    suffix = user_data.get("suffix", "Not set")
-    has_thumb = "✅ Set" if user_data.get("thumbnail") else "❌ Not set"
-    metadata = user_data.get("metadata", {})
-    meta_status = "✅ Enabled" if metadata.get("enabled") else "❌ Disabled"
-    
-    settings_text = f"""
-⚙️ **Your Settings**
-
-📝 **Caption:** `{caption}`
-🔤 **Prefix:** `{prefix}`
-🔤 **Suffix:** `{suffix}`
-🖼 **Thumbnail:** {has_thumb}
-📊 **Metadata:** {meta_status}
-
-*"Settings are like preferences in death - very personal."*
-
-Use /reset to reset all settings."""
+    if is_group:
+        bot_me = await client.get_me()
+        if not (f"@{bot_me.username}" in (message.text or "") or 
+                (message.reply_to_message and message.reply_to_message.from_user.is_self)):
+            return
     
     keyboard = [
         [
-            InlineKeyboardButton("📝 Set Caption", callback_data="set_caption"),
-            InlineKeyboardButton("🖼 Set Thumbnail", callback_data="set_thumb")
+            InlineKeyboardButton("📋 Commands", callback_data="help_commands"),
+            InlineKeyboardButton("🎯 Examples", callback_data="help_examples")
         ],
         [
-            InlineKeyboardButton("🔤 Prefix", callback_data="set_prefix"),
-            InlineKeyboardButton("🔤 Suffix", callback_data="set_suffix")
-        ],
-        [
-            InlineKeyboardButton("📊 Metadata", callback_data="metadata"),
-            InlineKeyboardButton("🔄 Reset All", callback_data="reset_all")
-        ],
-        [
-            InlineKeyboardButton("🔙 Back", callback_data="start")
+            InlineKeyboardButton("🔙 Back", callback_data="start"),
+            InlineKeyboardButton("❌ Close", callback_data="close")
         ]
     ]
     
+    # Get bot info for dynamic help
+    bot_info = await client.get_me()
+    help_text = Messages.HELP.format(bot_username=bot_info.username)
+    
     await message.reply_text(
-        settings_text,
+        help_text,
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN
     )
 
-# Reset command
-@Client.on_message(filters.command("reset"))
-async def reset_command(client: Client, message: Message):
+# Enhanced settings command
+@Client.on_message(filters.command("settings"))
+async def settings_command(client: Client, message: Message):
     user_id = message.from_user.id
     
-    keyboard = [[
-        InlineKeyboardButton("✅ Yes, Reset", callback_data="confirm_reset"),
-        InlineKeyboardButton("❌ Cancel", callback_data="cancel")
-    ]]
+    # Check group usage
+    is_group = message.chat.type != ChatType.PRIVATE
     
-    await message.reply_text(
-        "⚠️ **Are you sure?**\n\n"
-        "This will reset all your settings including:\n"
-        "• Caption template\n"
-        "• Thumbnail\n"
-        "• Prefix & Suffix\n"
-        "• Metadata settings\n\n"
-        "*\"Sometimes a fresh start is all we need.\"*",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-# Admin commands (only for ADMIN_ID)
-@Client.on_message(filters.command("stats") & filters.user(Config.ADMIN_ID))
-async def admin_stats(client: Client, message: Message):
-    # Get system stats
-    cpu_usage = psutil.cpu_percent()
-    ram_usage = psutil.virtual_memory().percent
-    disk_usage = psutil.disk_usage('/').percent
+    if is_group:
+        bot_me = await client.get_me()
+        if not (f"@{bot_me.username}" in (message.text or "") or 
+                (message.reply_to_message and message.reply_to_message.from_user.is_self)):
+            return
     
-    # Get bot stats
-    total_users = await db.total_users_count()
-    uptime = time.time() - client.uptime.timestamp()
-    hours, remainder = divmod(int(uptime), 3600)
-    minutes, seconds = divmod(remainder, 60)
-    
-    stats_text = f"""
-📊 **Bot Statistics**
-
-👥 **Total Users:** `{total_users}`
-⏱ **Uptime:** `{hours}h {minutes}m {seconds}s`
-
-**System Stats:**
-💻 **CPU:** `{cpu_usage}%`
-🧠 **RAM:** `{ram_usage}%`
-💾 **Disk:** `{disk_usage}%`
-
-*"Numbers are poetry in disguise."*"""
-    
-    await message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
-
-@Client.on_message(filters.command("broadcast") & filters.user(Config.ADMIN_ID))
-async def broadcast_command(client: Client, message: Message):
-    if not message.reply_to_message:
-        return await message.reply_text("Reply to a message to broadcast it.")
-    
-    broadcast_msg = message.reply_to_message
-    users = await db.get_all_users()
-    
-    success = 0
-    failed = 0
-    
-    status = await message.reply_text("📤 Broadcasting...")
-    
-    async for user in users:
-        try:
-            await broadcast_msg.copy(user["_id"])
-            success += 1
-        except:
-            failed += 1
+    try:
+        # Get comprehensive user data
+        user_data = await db.get_user_data(user_id)
         
-        if (success + failed) % 20 == 0:
-            await status.edit(f"📤 Broadcasting...\n✅ Success: {success}\n❌ Failed: {failed}")
-    
-    await status.edit(
-        f"✅ **Broadcast Complete**\n\n"
-        f"Success: `{success}`\n"
-        f"Failed: `{failed}`"
-    )
+        if not user_data:
+            # Initialize user if not exists
+            await db.add_user(user_id, message.from_user.username)
+            user_data = {}
+        
+        # Extract settings with defaults
+        caption = user_data.get("caption") or "Not set"
+        prefix = user_data.get("prefix") or "Not set"
+        suffix = user_data.get("suffix") or "Not set"
+        has_thumb = "✅ Set" if user_data.get("thumbnail") else "❌ Not set"
+        metadata = user_data.get("metadata", {})
+        meta_status = "✅ Enabled" if metadata.get("enabled") else "❌ Disabled"
+        
+        # Truncate long settings for display
+        def truncate_setting(text, max_len=25):
+            if len(str(text)) > max_len:
+                return str(text)[:max_len] + "..."
+            return str(text)
+        
+        settings_text = f"""⚙️ **Your Current Settings**
 
-# Callback query handler
-@Client.on_callback_query()
-async def callback_handler(client: Client, query):
-    data = query.data
-    
-    if data == "start":
+📝 **Caption Template:** `{truncate_setting(caption)}`
+🔤 **Filename Prefix:** `{truncate_setting(prefix)}`
+🔤 **Filename Suffix:** `{truncate_setting(suffix)}`
+🖼️ **Video Thumbnail:** {has_thumb}
+📊 **File Metadata:** {meta_status}
+
+*"{get_random_quote('start')}"*
+
+**Quick Actions:**
+Use the buttons below or these commands:
+• `/set_caption` - Configure caption template
+• `/set_prefix` & `/set_suffix` - Set filename additions
+• Send photo - Set video thumbnail
+• `/metadata` - Configure file metadata
+• `/reset_all` - Reset everything"""
+        
+        # Create settings keyboard
         keyboard = [
             [
-                InlineKeyboardButton("📚 Help", callback_data="help"),
-                InlineKeyboardButton("🎭 About", callback_data="about")
+                InlineKeyboardButton("📝 Caption", callback_data="help_caption"),
+                InlineKeyboardButton("🖼️ Thumbnail", callback_data="help_thumb")
             ],
             [
-                InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
-                InlineKeyboardButton("📊 Stats", callback_data="stats")
+                InlineKeyboardButton("🔤 Prefix/Suffix", callback_data="help_prefix"),
+                InlineKeyboardButton("📊 Metadata", callback_data="help_metadata")
+            ],
+            [
+                InlineKeyboardButton("🔄 Reset All", callback_data="reset_confirm"),
+                InlineKeyboardButton("🔙 Back", callback_data="start")
             ]
         ]
         
-        if Config.SUPPORT_CHAT:
-            keyboard.append([
-                InlineKeyboardButton("💬 Support", url=f"https://t.me/{Config.SUPPORT_CHAT}")
-            ])
-        
-        await query.message.edit_text(
-            Messages.START.format(user=query.from_user.mention),
+        await message.reply_text(
+            settings_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
+        
+    except Exception as e:
+        logger.error(f"Settings command error: {e}")
+        await message.reply_text(
+            "❌ **Error Loading Settings**\n\n"
+            "There was an issue accessing your settings. Please try again.\n\n"
+            f"*\"Even the best systems encounter occasional hiccups.\"*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+# Enhanced stats command for users
+@Client.on_message(filters.command(["stats", "mystats"]))
+async def user_stats_command(client: Client, message: Message):
+    user_id = message.from_user.id
     
-    elif data == "help":
+    # Check group usage
+    is_group = message.chat.type != ChatType.PRIVATE
+    
+    if is_group:
+        bot_me = await client.get_me()
+        if not (f"@{bot_me.username}" in (message.text or "") or 
+                (message.reply_to_message and message.reply_to_message.from_user.is_self)):
+            return
+    
+    try:
+        user_stats = await db.get_user_stats(user_id)
+        
+        files_renamed = user_stats.get('files_renamed', 0)
+        join_date = user_stats.get('join_date', 'Unknown')
+        last_used = user_stats.get('last_used', 'Never')
+        
+        # Format dates
+        if hasattr(join_date, 'strftime'):
+            join_date_str = join_date.strftime('%Y-%m-%d')
+        else:
+            join_date_str = str(join_date)
+            
+        if hasattr(last_used, 'strftime'):
+            last_used_str = last_used.strftime('%Y-%m-%d %H:%M')
+        else:
+            last_used_str = str(last_used)
+        
+        # Check for milestones
+        milestone_msg = Messages.get_milestone_message(files_renamed)
+        
+        stats_text = f"""📊 **Your Statistics**
+
+📁 **Files Renamed:** `{files_renamed}`
+📅 **Member Since:** `{join_date_str}`
+⏰ **Last Activity:** `{last_used_str}`
+
+{milestone_msg}
+
+*"Statistics tell the story of our digital journey."*"""
+        
         keyboard = [[
             InlineKeyboardButton("🔙 Back", callback_data="start"),
-            InlineKeyboardButton("❌ Close", callback_data="close")
+            InlineKeyboardButton("🔄 Refresh", callback_data="stats")
         ]]
         
-        await query.message.edit_text(
-            Messages.HELP,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    elif data == "about":
-        bot_info = await client.get_me()
-        about_text = Messages.ABOUT.format(
-            bot_name=bot_info.first_name,
-            pyrogram_version="2.0.106"
-        )
-        
-        keyboard = [[
-            InlineKeyboardButton("🔙 Back", callback_data="start"),
-            InlineKeyboardButton("❌ Close", callback_data="close")
-        ]]
-        
-        await query.message.edit_text(
-            about_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    elif data == "close":
-        await query.message.delete()
-    
-    elif data == "confirm_reset":
-        user_id = query.from_user.id
-        await db.reset_user_settings(user_id)
-        await query.answer("✅ All settings have been reset!", show_alert=True)
-        await query.message.edit_text(
-            "✅ **Settings Reset Successfully**\n\n"
-            "*\"A clean slate, like a blank page waiting for a story.\"*"
-        )
-    
-    elif data == "cancel":
-        await query.message.edit_text("❌ Operation cancelled.")
-    
-    elif data == "stats":
-        user_id = query.from_user.id
-        stats = await db.get_stats(user_id)
-        
-        stats_text = f"""
-📊 **Your Statistics**
-
-📁 **Files Renamed:** `{stats.get('files_renamed', 0)}`
-⏰ **Last Active:** `{stats.get('last_used', 'Never').strftime('%Y-%m-%d %H:%M')}`
-
-*"Statistics are just stories waiting to be told."*"""
-        
-        keyboard = [[
-            InlineKeyboardButton("🔙 Back", callback_data="start")
-        ]]
-        
-        await query.message.edit_text(
+        await message.reply_text(
             stats_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode=ParseMode.MARKDOWN
         )
+        
+    except Exception as e:
+        logger.error(f"User stats error: {e}")
+        await message.reply_text(
+            "❌ **Error Loading Statistics**\n\n"
+            "Unable to retrieve your statistics at the moment.\n\n"
+            f"*\"Numbers sometimes hide behind the fog of technical difficulties.\"*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+# Reset command with confirmation
+@Client.on_message(filters.command(["reset", "reset_all"]))
+async def reset_command(client: Client, message: Message):
+    user_id = message.from_user.id
+    
+    # Check group usage
+    is_group = message.chat.type != ChatType.PRIVATE
+    
+    if is_group:
+        bot_me = await client.get_me()
+        if not (f"@{bot_me.username}" in (message.text or "") or 
+                (message.reply_to_message and message.reply_to_message.from_user.is_self)):
+            return
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Yes, Reset Everything", callback_data=f"reset_confirmed_{user_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="settings")
+        ]
+    ]
+    
+    await message.reply_text(
+        Messages.CONFIRM_RESET_ALL,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+# Admin-only commands
+@Client.on_message(filters.command("adminstats") & filters.user(Config.ADMIN_ID))
+async def admin_stats_command(client: Client, message: Message):
+    try:
+        # Get system stats
+        cpu_usage = psutil.cpu_percent(interval=1)
+        ram = psutil.virtual_memory()
+        ram_usage = ram.percent
+        disk = psutil.disk_usage('/')
+        disk_usage = disk.percent
+        
+        # Get bot stats
+        total_users = await db.total_users_count()
+        active_users_24h = await db.get_active_users_count(hours=24)
+        files_today = await db.get_files_processed_today()
+        
+        # Calculate uptime
+        if hasattr(client, 'start_time'):
+            uptime_seconds = time.time() - client.start_time
+        else:
+            uptime_seconds = 0
+        
+        hours, remainder = divmod(int(uptime_seconds), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_str = f"{hours}h {minutes}m {seconds}s"
+        
+        # Format memory usage
+        ram_total = humanbytes(ram.total)
+        ram_used = humanbytes(ram.used)
+        disk_total = humanbytes(disk.total)
+        disk_used = humanbytes(disk.used)
+        
+        stats_text = Messages.ADMIN_STATS.format(
+            total_users=total_users,
+            active_users=active_users_24h,
+            files_today=files_today,
+            cpu_usage=cpu_usage,
+            ram_usage=ram_usage,
+            disk_usage=disk_usage,
+            uptime=uptime_str,
+            ram_info=f"{ram_used}/{ram_total}",
+            disk_info=f"{disk_used}/{disk_total}"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🔄 Refresh", callback_data="admin_refresh_stats"),
+                InlineKeyboardButton("📊 Detailed Stats", callback_data="admin_detailed_stats")
+            ],
+            [
+                InlineKeyboardButton("👥 User Management", callback_data="admin_users"),
+                InlineKeyboardButton("⚙️ System Control", callback_data="admin_system")
+            ]
+        ]
+        
+        await message.reply_text(
+            stats_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+    except Exception as e:
+        logger.error(f"Admin stats error: {e}")
+        await message.reply_text(f"❌ Error getting stats: `{e}`")
+
+@Client.on_message(filters.command("broadcast") & filters.user(Config.ADMIN_ID))
+async def broadcast_command(client: Client, message: Message):
+    if not message.reply_to_message:
+        return await message.reply_text(
+            "**Broadcast Usage:**\n"
+            "Reply to a message to broadcast it to all users.\n\n"
+            "*\"Words must first be chosen before they can be spread.\"*"
+        )
+    
+    broadcast_msg = message.reply_to_message
+    
+    try:
+        users = await db.get_all_users()
+        total_users = await db.total_users_count()
+        
+        success = 0
+        failed = 0
+        
+        status = await message.reply_text(Messages.ADMIN_BROADCAST_START)
+        
+        async for user in users:
+            try:
+                await broadcast_msg.copy(user["_id"])
+                success += 1
+            except Exception as e:
+                logger.debug(f"Broadcast failed for user {user['_id']}: {e}")
+                failed += 1
+            
+            # Update progress every 20 users
+            if (success + failed) % 20 == 0:
+                try:
+                    progress = ((success + failed) / total_users) * 100
+                    await status.edit_text(
+                        f"📡 **Broadcasting...**\n\n"
+                        f"Progress: {progress:.1f}%\n"
+                        f"✅ Successful: `{success}`\n"
+                        f"❌ Failed: `{failed}`\n"
+                        f"⏳ Remaining: `{total_users - success - failed}`"
+                    )
+                except:
+                    pass
+        
+        # Final broadcast results
+        broadcast_complete = Messages.ADMIN_BROADCAST_COMPLETE.format(
+            success=success,
+            failed=failed,
+            total=total_users
+        )
+        
+        await status.edit_text(broadcast_complete)
+        
+    except Exception as e:
+        logger.error(f"Broadcast error: {e}")
+        await message.reply_text(f"❌ Broadcast failed: `{e}`")
+
+# Environment management commands (Admin only)
+@Client.on_message(filters.command("listenv") & filters.user(Config.ADMIN_ID))
+async def list_env_command(client: Client, message: Message):
+    from Bot.config import list_env_keys
+    
+    keys = list_env_keys()
+    
+    env_text = "🔑 **Available Environment Variables:**\n\n"
+    for i, key in enumerate(keys, 1):
+        env_text += f"`{i:2d}.` `{key}`\n"
+    
+    env_text += f"\n**Total:** `{len(keys)}` variables\n"
+    env_text += "\n*Use `/getenv KEY` to view values*\n"
+    env_text += "*Use `/setenv KEY VALUE` to modify*"
+    
+    await message.reply_text(env_text, parse_mode=ParseMode.MARKDOWN)
+
+@Client.on_message(filters.command("getenv") & filters.user(Config.ADMIN_ID))
+async def get_env_command(client: Client, message: Message):
+    from Bot.config import get_env_var
+    
+    if len(message.command) < 2:
+        return await message.reply_text(
+            "**Usage:** `/getenv KEY`\n\n"
+            "**Example:** `/getenv MAX_FILE_SIZE`\n\n"
+            "Use `/listenv` to see available keys."
+        )
+    
+    key = message.command[1].strip().upper()
+    value = get_env_var(key)
+    
+    if value is None:
+        await message.reply_text(f"❌ Variable `{key}` not found or not allowed.")
+    else:
+        # Hide sensitive values
+        if any(sensitive in key.lower() for sensitive in ['token', 'hash', 'password', 'key']):
+            display_value = value[:10] + "..." if len(value) > 10 else "***"
+        else:
+            display_value = value
+            
+        await message.reply_text(
+            f"🔍 **Environment Variable**\n\n"
+            f"**Key:** `{key}`\n"
+            f"**Value:** `{display_value}`\n\n"
+            f"*Current configuration retrieved.*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+@Client.on_message(filters.command("setenv") & filters.user(Config.ADMIN_ID))
+async def set_env_command(client: Client, message: Message):
+    from Bot.config import set_env_var
+    
+    if len(message.command) < 3:
+        return await message.reply_text(
+            "**Usage:** `/setenv KEY VALUE`\n\n"
+            "**Example:** `/setenv MAX_FILE_SIZE 4294967296`\n\n"
+            "Use `/listenv` to see available keys."
+        )
+    
+    key = message.command[1].strip().upper()
+    value = " ".join(message.command[2:]).strip()
+    
+    success = set_env_var(key, value)
+    
+    if success:
+        await message.reply_text(
+            f"✅ **Environment Updated**\n\n"
+            f"**Variable:** `{key}`\n"
+            f"**New Value:** `{value}`\n\n"
+            f"*Configuration updated successfully.*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await message.reply_text(
+            f"❌ **Update Failed**\n\n"
+            f"Variable `{key}` is not allowed or update failed.\n"
+            f"Use `/listenv` to see available variables."
+        )
+
+@Client.on_message(filters.command("reload") & filters.user(Config.ADMIN_ID))
+async def reload_command(client: Client, message: Message):
+    await message.reply_text(
+        "🔄 **Configuration Reload**\n\n"
+        "Some settings are applied immediately, but for full effect:\n"
+        "• Restart the bot service\n"
+        "• Re-initialize database connections\n"
+        "• Clear temporary data\n\n"
+        "*\"Sometimes a complete refresh is necessary for true change.\"*",
+        parse_mode=ParseMode.MARKDOWN
+    )
