@@ -3,7 +3,7 @@ from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from pyrogram.enums import ParseMode, ChatType
 from database import db
-from config import Config, Messages
+from Bot.config import Config, Messages
 from datetime import datetime
 import psutil
 import time
