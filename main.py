@@ -3,7 +3,7 @@ import asyncio
 import logging
 from pyrogram import Client, __version__
 from pyrogram.raw.all import layer
-from config import Config
+from Bot.config import Config
 from datetime import datetime
 import pytz
 
